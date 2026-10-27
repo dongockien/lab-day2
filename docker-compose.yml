@@ -1,0 +1,47 @@
+# Lab Ngày 2: L4 (HAProxy) và L7 (nginx) trước 3 bản sao của một API nhỏ.
+# Chạy:  ./scripts/gen-certs.sh && docker compose up -d --build
+x-api: &api
+  build: ./api
+  cap_add: [NET_ADMIN]            # chỉ để mô phỏng firewall bằng iptables trong lab
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2)"]
+    interval: 3s
+    timeout: 3s
+    retries: 5
+
+services:
+  api1: { <<: *api, environment: { NAME: api1 } }
+  api2: { <<: *api, environment: { NAME: api2 } }
+  api3: { <<: *api, environment: { NAME: api3 } }
+
+  # (a) L4: HAProxy mode tcp
+  haproxy:
+    image: haproxy:2.9-alpine
+    depends_on: { api1: {condition: service_healthy}, api2: {condition: service_healthy}, api3: {condition: service_healthy} }
+    volumes: ["./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro"]
+    ports:
+      - "8081:8081"    # L4 thuần -> 3 api
+      - "8090:8090"    # L4 -> 2 nginx (mô hình L4 + L7)
+      - "9443:9443"    # L4 TLS passthrough -> nginx
+      - "8404:8404"    # trang stats
+
+  # (b) L7: nginx định tuyến /api và /ai
+  nginx: &nginx
+    image: nginx:1.27-alpine
+    depends_on: { api1: {condition: service_healthy}, api2: {condition: service_healthy}, api3: {condition: service_healthy} }
+    volumes:
+      - "./nginx/nginx.conf:/etc/nginx/nginx.conf:ro"
+      - "./certs:/certs:ro"
+    ports:
+      - "8082:80"      # HTTP trực tiếp tới nginx
+      - "8443:443"     # HTTPS (nginx giải mã TLS)
+  nginx2:
+    <<: *nginx
+    ports: []          # bản thứ hai chỉ truy cập qua HAProxy
+
+  # Bắn tải: docker compose run --rm k6 run -e TARGET=http://haproxy:8081 /scripts/load.js
+  k6:
+    image: grafana/k6:latest
+    profiles: ["tools"]
+    volumes: ["./k6:/scripts:ro"]
+    entrypoint: ["k6"]
